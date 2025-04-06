@@ -77,6 +77,7 @@ bool RobotStateController::init(hardware_interface::RobotHW* robot_hw, ros::Node
 
   addChildren(tree.getRootSegment());
 
+// 将具有“模拟”关系的关节存储到一个 std::map 中。
   mimic_ = new std::map<std::string, urdf::JointMimicSharedPtr>;
   for (auto& joint : model_.joints_)
     if (joint.second->mimic)
@@ -91,6 +92,7 @@ bool RobotStateController::init(hardware_interface::RobotHW* robot_hw, ros::Node
   return true;
 }
 
+//除去字符串第一个斜杠
 std::string stripSlash(const std::string& in)
 {
   if (!in.empty() && in[0] == '/')
@@ -102,6 +104,7 @@ std::string stripSlash(const std::string& in)
 
 void RobotStateController::update(const ros::Time& time, const ros::Duration& period)
 {
+//  ros clock reset 后，清除 tf buffer
   if (last_update_ > time)
   {
     ROS_WARN("Moved backwards in time (probably because ROS clock was reset), clear all tf buffer!");
@@ -141,6 +144,7 @@ void RobotStateController::update(const ros::Time& time, const ros::Duration& pe
     tf_transform.child_frame_id = stripSlash(seg->second.tip);
     tf_static_transforms.push_back(tf_transform);
   }
+//  true or false 是否立即广播
   for (const auto& tran : tf_transforms)
     tf_buffer_->setTransform(tran, "robot_state_controller", false);
   for (const auto& tran : tf_static_transforms)

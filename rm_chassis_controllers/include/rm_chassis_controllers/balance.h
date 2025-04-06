@@ -35,6 +35,14 @@ private:
   geometry_msgs::Twist odometry() override;
   static const int STATE_DIM = 10;
   static const int CONTROL_DIM = 4;
+  /*
+  k_：一个 CONTROL_DIM × STATE_DIM 的增益矩阵，可能是控制增益矩阵（如 LQR 的反馈增益）。
+  a_：一个 STATE_DIM × STATE_DIM 的系统矩阵，通常用于描述系统的状态转换，即 xk+1=Axk+Bukxk+1​=Axk​+Buk​。
+  q_：一个 STATE_DIM × STATE_DIM 的权重矩阵，通常用于优化（如 LQR 控制中的状态权重矩阵）。
+  b_：一个 STATE_DIM × CONTROL_DIM 的输入矩阵，描述输入 uu 如何影响系统状态变化。
+  r_：一个 CONTROL_DIM × CONTROL_DIM 的权重矩阵，可能是 LQR 中的控制输入权重矩阵。
+  x_：一个 STATE_DIM × 1 的状态向量，表示系统当前的状态。
+   */
   Eigen::Matrix<double, CONTROL_DIM, STATE_DIM> k_{};
   Eigen::Matrix<double, STATE_DIM, STATE_DIM> a_{}, q_{};
   Eigen::Matrix<double, STATE_DIM, CONTROL_DIM> b_{};

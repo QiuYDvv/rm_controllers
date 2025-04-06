@@ -203,6 +203,7 @@ void Controller::push(const ros::Time& time, const ros::Duration& period)
   for (auto& ctrl_friction_r : ctrls_friction_r_)
   {
     if (ctrl_friction_r->joint_.getVelocity() > push_wheel_speed_threshold_ * ctrl_friction_r->command_ ||
+
         ctrl_friction_r->joint_.getVelocity() >= -M_PI)
       wheel_speed_ready = false;
   }
@@ -212,6 +213,7 @@ void Controller::push(const ros::Time& time, const ros::Duration& period)
     {
       ctrl_trigger_.setCommand(ctrl_trigger_.command_struct_.position_ -
                                    2. * M_PI / static_cast<double>(push_per_rotation_),
+
                                -1 * cmd_.hz * 2. * M_PI / static_cast<double>(push_per_rotation_));
       last_shoot_time_ = time;
     }
@@ -286,13 +288,15 @@ void Controller::setSpeed(const rm_msgs::ShootCmd& cmd)
   if (!friction_wheel_block)
   {
     for (size_t i = 0; i < ctrls_friction_l_.size(); i++)
-      ctrls_friction_l_[i]->setCommand(cmd_.wheel_speed + config_.extra_wheel_speed + wheel_speed_offset_l_[i]);
+      ctrls_friction_l_[i]->setCommand(cmd_.wheel_speed +
+                                       config_.extra_wheel_speed + wheel_speed_offset_l_[i]);
     for (size_t i = 0; i < ctrls_friction_r_.size(); i++)
       ctrls_friction_r_[i]->setCommand(-cmd_.wheel_speed - config_.extra_wheel_speed - wheel_speed_offset_r_[i]);
   }
   else
   {
-    double command = (friction_block_count <= static_cast<int>(anti_friction_block_duty_cycle_ * 1000)) ?
+    double command = (friction_block_count <= static_cast<int>(
+                                                  anti_friction_block_duty_cycle_ * 1000)) ?
                          anti_friction_block_vel_ :
                          0.;
     for (auto& ctrl_friction_l : ctrls_friction_l_)
@@ -311,7 +315,8 @@ void Controller::normalize()
 {
   double push_angle = 2. * M_PI / static_cast<double>(push_per_rotation_);
   ctrl_trigger_.setCommand(
-      push_angle * std::floor((ctrl_trigger_.joint_.getPosition() + 0.01 + config_.exit_push_threshold) / push_angle));
+      push_angle * std::floor((ctrl_trigger_.joint_.getPosition() + 0.01 +
+                               config_.exit_push_threshold) / push_angle));
 }
 
 void Controller::judgeBulletShoot(const ros::Time& time, const ros::Duration& period)
@@ -335,12 +340,14 @@ void Controller::judgeBulletShoot(const ros::Time& time, const ros::Duration& pe
   }
   double friction_change_vel = abs(ctrls_friction_l_[0]->joint_.getVelocity()) - last_wheel_speed_;
   last_wheel_speed_ = abs(ctrls_friction_l_[0]->joint_.getVelocity());
+
   count_++;
   if (has_shoot_last_)
   {
     has_shoot_ = true;
   }
   has_shoot_last_ = has_shoot_;
+
   if (count_ == 2)
   {
     if (local_heat_state_pub_->trylock())

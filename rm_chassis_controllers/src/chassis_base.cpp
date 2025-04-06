@@ -81,6 +81,7 @@ bool ChassisBase<T...>::init(hardware_interface::RobotHW* robot_hw, ros::NodeHan
   odom_pub_.reset(new realtime_tools::RealtimePublisher<nav_msgs::Odometry>(root_nh, "odom", 100));
   odom_pub_->msg_.header.frame_id = "odom";
   odom_pub_->msg_.child_frame_id = "base_link";
+   //对角线协方差矩阵
   odom_pub_->msg_.twist.covariance = { static_cast<double>(twist_cov_list[0]), 0., 0., 0., 0., 0., 0.,
                                        static_cast<double>(twist_cov_list[1]), 0., 0., 0., 0., 0., 0.,
                                        static_cast<double>(twist_cov_list[2]), 0., 0., 0., 0., 0., 0.,
@@ -104,10 +105,13 @@ bool ChassisBase<T...>::init(hardware_interface::RobotHW* robot_hw, ros::NodeHan
   }
   world2odom_.setRotation(tf2::Quaternion::getIdentity());
 
+  //订阅odom
   outside_odom_sub_ =
       controller_nh.subscribe<nav_msgs::Odometry>("/odometry", 10, &ChassisBase::outsideOdomCallback, this);
+  //底盘速度
   cmd_chassis_sub_ =
       controller_nh.subscribe<rm_msgs::ChassisCmd>("/cmd_chassis", 1, &ChassisBase::cmdChassisCallback, this);
+  //速度
   cmd_vel_sub_ = root_nh.subscribe<geometry_msgs::Twist>("cmd_vel", 1, &ChassisBase::cmdVelCallback, this);
 
   if (controller_nh.hasParam("pid_follow"))
@@ -120,6 +124,7 @@ bool ChassisBase<T...>::init(hardware_interface::RobotHW* robot_hw, ros::NodeHan
 template <typename... T>
 void ChassisBase<T...>::update(const ros::Time& time, const ros::Duration& period)
 {
+  //获取底盘速度命令和速度命令
   rm_msgs::ChassisCmd cmd_chassis = cmd_rt_buffer_.readFromRT()->cmd_chassis_;
   geometry_msgs::Twist cmd_vel = cmd_rt_buffer_.readFromRT()->cmd_vel_;
 
@@ -140,6 +145,7 @@ void ChassisBase<T...>::update(const ros::Time& time, const ros::Duration& perio
     vel_cmd_.z = cmd_vel.angular.z;
   }
 
+  //follow_source_frame_
   if (cmd_rt_buffer_.readFromRT()->cmd_chassis_.follow_source_frame.empty())
     follow_source_frame_ = "yaw";
   else
@@ -224,8 +230,17 @@ void ChassisBase<T...>::twist(const ros::Time& time, const ros::Duration& period
     quatToRPY(robot_state_handle_.lookupTransform("base_link", command_source_frame_, ros::Time(0)).transform.rotation,
               roll, pitch, yaw);
 
+    /*
+    这四个值大概是：
+    -π/4、π/4、3π/4、-3π/4
+    也就是把单位圆按 90° 间隔划成 4 个象限的方向
+    */
     double angle[4] = { -0.785, 0.785, 2.355, -2.355 };
     double off_set = 0.0;
+    /*
+    这部分是寻找离 yaw 最近的角度方向（只要角距小于约 0.79 rad ≈ 45° 就接受）。
+    也就是说，在 yaw 接近某个固定方向时，选取对应的偏移角 off_set = i。
+    */
     for (double i : angle)
     {
       if (std::abs(angles::shortest_angular_distance(yaw, i)) < 0.79)
@@ -234,6 +249,7 @@ void ChassisBase<T...>::twist(const ros::Time& time, const ros::Duration& period
         break;
       }
     }
+    //所以目标角度会在 off_set 左右周期性地摆动，频率 1Hz，幅度是 twist_angular_
     double follow_error =
         angles::shortest_angular_distance(yaw, twist_angular_ * sin(2 * M_PI * time.toSec()) + off_set);
 
@@ -289,15 +305,20 @@ void ChassisBase<T...>::updateOdom(const ros::Time& time, const ros::Duration& p
       odom2base_.transform.translation.y += linear_vel_odom.y * period.toSec();
       odom2base_.transform.translation.z += linear_vel_odom.z * period.toSec();
     }
+    //这个 length 是角速度向量的大小，用于判断是否有角运动。如果有角运动，就根据角速度向量的方向和大小来更新 odom2base_ 的旋转部分。
     length =
         std::sqrt(std::pow(angular_vel_odom.x, 2) + std::pow(angular_vel_odom.y, 2) + std::pow(angular_vel_odom.z, 2));
     if (length > 0.001)
     {  // avoid nan quat
       tf2::Quaternion odom2base_quat, trans_quat;
       tf2::fromMsg(odom2base_.transform.rotation, odom2base_quat);
+      //“绕单位向量 axis 旋转 angle 弧度，构造出一个旋转四元数”
+      //先 “变成角度”，再喂给四元数！
       trans_quat.setRotation(tf2::Vector3(angular_vel_odom.x / length, angular_vel_odom.y / length,
                                           angular_vel_odom.z / length),
                              length * period.toSec());
+      //注意四元数乘法是新的旋转在前，老的在后，表示：
+      //“先转一小步（trans_quat），再在老姿态基础上得到新姿态”
       odom2base_quat = trans_quat * odom2base_quat;
       odom2base_quat.normalize();
       odom2base_.transform.rotation = tf2::toMsg(odom2base_quat);
@@ -308,14 +329,17 @@ void ChassisBase<T...>::updateOdom(const ros::Time& time, const ros::Duration& p
   {
     auto* odom_msg = odom_buffer_.readFromRT();
 
+    //world2sensor里程计获取
     tf2::Transform world2sensor;
     world2sensor.setOrigin(
         tf2::Vector3(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z));
     world2sensor.setRotation(tf2::Quaternion(odom_msg->pose.pose.orientation.x, odom_msg->pose.pose.orientation.y,
                                              odom_msg->pose.pose.orientation.z, odom_msg->pose.pose.orientation.w));
 
+    //判断：world → odom 的旋转是不是单位四元数（即没有旋转）
     if (world2odom_.getRotation() == tf2::Quaternion::getIdentity())  // First received
     {
+      //odom2sensor激光雷达获取
       tf2::Transform odom2sensor;
       try
       {
@@ -328,8 +352,10 @@ void ChassisBase<T...>::updateOdom(const ros::Time& time, const ros::Duration& p
         ROS_WARN("%s", ex.what());
         return;
       }
+      //world2odom_矩阵计算
       world2odom_ = world2sensor * odom2sensor.inverse();
     }
+//    base2sensor，robot_state_handle_
     tf2::Transform base2sensor;
     try
     {
@@ -342,10 +368,13 @@ void ChassisBase<T...>::updateOdom(const ros::Time& time, const ros::Duration& p
       ROS_WARN("%s", ex.what());
       return;
     }
+    //odom2base矩阵计算
+    //通过 odom2base.getOrigin() 获取了变换的平移部分（x, y, z），然后更新到 odom2base_ 的消息中。
     tf2::Transform odom2base = world2odom_.inverse() * world2sensor * base2sensor.inverse();
     odom2base_.transform.translation.x = odom2base.getOrigin().x();
     odom2base_.transform.translation.y = odom2base.getOrigin().y();
     odom2base_.transform.translation.z = odom2base.getOrigin().z();
+    //标志位，表示是否更新了 odom2base_ 的数据。通常你用这个标志来控制是否需要发布更新后的消息。
     topic_update_ = false;
   }
 
@@ -353,21 +382,28 @@ void ChassisBase<T...>::updateOdom(const ros::Time& time, const ros::Duration& p
 
   if (publish_rate_ > 0.0 && last_publish_time_ + ros::Duration(1.0 / publish_rate_) < time)
   {
+    // 检查是否可以发布
     if (odom_pub_->trylock())
     {
+      // 设置消息时间戳
       odom_pub_->msg_.header.stamp = time;
+      // 填充消息的线速度（x, y）和角速度（z）
       odom_pub_->msg_.twist.twist.linear.x = vel_base.linear.x;
       odom_pub_->msg_.twist.twist.linear.y = vel_base.linear.y;
       odom_pub_->msg_.twist.twist.angular.z = vel_base.angular.z;
+      // 发布消息并解锁
       odom_pub_->unlockAndPublish();
     }
+    // 如果启用了 TF 广播，发送 TF 变换
     if (enable_odom_tf_ && publish_odom_tf_)
       tf_broadcaster_.sendTransform(odom2base_);
+    // 更新最后一次发布的时间
     last_publish_time_ = time;
   }
 }
 
 template <typename... T>
+//恢复过程中用于重置状态，防止继续执行错误的命令。
 void ChassisBase<T...>::recovery()
 {
   ramp_x_->clear(vel_cmd_.x);

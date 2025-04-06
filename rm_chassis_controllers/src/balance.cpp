@@ -12,6 +12,22 @@
 #include <rm_msgs/BalanceState.h>
 #include <angles/angles.h>
 
+/*
+两轮自平衡控制（倒立摆控制）
+    使用 IMU（陀螺仪 + 加速度计）实时获取机体姿态角（如 pitch、yaw 等）。
+    使用控制器（如 LQR、PID）根据设定姿态（通常为 pitch = 0）与当前实际姿态差值，输出轮子的驱动扭矩以维持平衡。
+    控制的本质是将 pitch 角度和 pitch 角速度反馈用于控制 x 方向的加速度，防止跌倒。
+轮腿动量控制
+    两个动量轮（block）通常用于辅助姿态控制（尤其在 pitch 调整方面），作为附加的“动量反应轮”。
+    通过调节左右动量轮的转动角速度/加速度，引入角动量变化，从而对 pitch 或 roll 提供补偿。
+位置与速度跟踪
+    使用轮子编码器估计位移和速度。
+    融合 IMU 数据，通过卡尔曼滤波或简单积分方法，得到全局位置（或者相对位置）与速度估计。
+    根据目标位移、速度等，使用前馈/反馈控制调节驱动力。
+状态机
+  状态如 NORMAL、BLOCK、FALLEN 等。
+  不同状态采用不同的控制策略（如 BLOCK 模式通过设置较大的反向扭矩自救）。
+*/
 namespace rm_chassis_controllers
 {
 bool BalanceController::init(hardware_interface::RobotHW* robot_hw, ros::NodeHandle& root_nh,
@@ -30,10 +46,17 @@ bool BalanceController::init(hardware_interface::RobotHW* robot_hw, ros::NodeHan
     ROS_ERROR("Some Joints' name doesn't given. (namespace: %s)", controller_nh.getNamespace().c_str());
     return false;
   }
+  //left_wheel_joint_handle_一个力矩器的句柄，里面包含了该关节的位置、速度、 efforts，控制左前轮
+  //right_wheel_joint_handle_一个力矩器的句柄，里面包含了该关节的位置、速度、 efforts，控制右前轮
+  //joint_handles_包含了两个句柄，分别是left_wheel_joint_handle_和right_wheel_joint_handle_
   left_wheel_joint_handle_ = robot_hw->get<hardware_interface::EffortJointInterface>()->getHandle(left_wheel_joint);
   right_wheel_joint_handle_ = robot_hw->get<hardware_interface::EffortJointInterface>()->getHandle(right_wheel_joint);
   joint_handles_.push_back(left_wheel_joint_handle_);
   joint_handles_.push_back(right_wheel_joint_handle_);
+
+  //left_momentum_block_joint_handle_一个力矩器的句柄，里面包含了该关节的位置、速度、 efforts，控制左动量块
+  //right_momentum_block_joint_handle_一个力矩器的句柄，里面包含了该关节的位置、速度、 efforts，控制右动量块
+
   left_momentum_block_joint_handle_ =
       robot_hw->get<hardware_interface::EffortJointInterface>()->getHandle(left_momentum_block_joint);
   right_momentum_block_joint_handle_ =
@@ -47,6 +70,14 @@ bool BalanceController::init(hardware_interface::RobotHW* robot_hw, ros::NodeHan
   // y_b is the y-axis component of the coordinates of the momentum block in the base_link coordinate system
   // z_b is the vertical component of the distance between the momentum block and the center of mass of robot
   // i_m is the moment of inertia of the robot around the y-axis of base_link coordinate.
+  //m_w：单个轮子的质量。
+  //m：机器人除轮子和动量块（momentum blocks）之外的质量。
+  //m_b：单个动量块的质量。
+  //i_w：轮子绕电机旋转轴的转动惯量。
+  //l：轮子中心到机器人质心的垂直距离分量。
+  //y_b：动量块在base_link 坐标系中的 y 轴坐标分量。
+  //z_b：动量块到机器人质心的垂直距离分量。
+  //i_m：机器人绕 base_link 坐标系 y 轴的转动惯量。
   double m_w, m, m_b, i_w, l, y_b, z_b, g, i_m;
 
   if (!controller_nh.getParam("m_w", m_w))
@@ -412,32 +443,51 @@ void BalanceController::normal(const ros::Time& time, const ros::Duration& perio
     balance_state_changed_ = false;
   }
 
+  /*
+  当小车发生俯仰（比如起跳或冲坡），轮子在“相对于地面”没有转，但 IMU 会测得有角速度；
+  这时轮子的旋转并不等于车体前进，而是由于俯仰引起的假象；
+  减去 ω_y 后，可以更准确反映小车“纯粹平移”的速度。
+   */
   x_[5] = ((left_wheel_joint_handle_.getVelocity() + right_wheel_joint_handle_.getVelocity()) / 2 -
            imu_handle_.getAngularVelocity()[1]) *
           wheel_radius_;
+  //角度
   x_[0] += x_[5] * period.toSec();
+  //yaw角度
   x_[1] = yaw_;
+  //pitch角度
   x_[2] = pitch_;
+  //左动量轮角度位置
   x_[3] = left_momentum_block_joint_handle_.getPosition();
+  //右动量轮角度位置
   x_[4] = right_momentum_block_joint_handle_.getPosition();
+  //陀螺仪速度zy
   x_[6] = angular_vel_base_.z;
   x_[7] = angular_vel_base_.y;
+  //左动量轮线速度
   x_[8] = left_momentum_block_joint_handle_.getVelocity();
+  //右动量轮线速度
   x_[9] = right_momentum_block_joint_handle_.getVelocity();
+  //yaw_des_角度累加
   yaw_des_ += vel_cmd_.z * period.toSec();
+  //position_des_累加
   position_des_ += vel_cmd_.x * period.toSec();
   Eigen::Matrix<double, CONTROL_DIM, 1> u;
   auto x = x_;
+  //纠正的偏移
   x(0) -= position_des_;
   x(1) = angles::shortest_angular_distance(yaw_des_, x_(1));
+  //速度误差
   if (state_ != RAW)
     x(5) -= vel_cmd_.x;
   x(6) -= vel_cmd_.z;
+  //重置位置状态误差，防止误差积累过大造成控制不稳定或震荡
   if (std::abs(x(0) + position_offset_) > position_clear_threshold_)
   {
     x_[0] = 0.;
     position_des_ = position_offset_;
   }
+  //lqr控制
   u = k_ * (-x);
   if (state_pub_->trylock())
   {
@@ -452,10 +502,10 @@ void BalanceController::normal(const ros::Time& time, const ros::Duration& perio
     state_pub_->msg_.theta_dot = x(7);
     state_pub_->msg_.x_b_l_dot = x(8);
     state_pub_->msg_.x_b_r_dot = x(9);
-    state_pub_->msg_.T_l = u(0);
-    state_pub_->msg_.T_r = u(1);
-    state_pub_->msg_.f_b_l = u(2);
-    state_pub_->msg_.f_b_r = u(3);
+    state_pub_->msg_.T_l = u(0);     // 左轮控制输入力矩 Torque Left
+    state_pub_->msg_.T_r = u(1);     // 右轮控制输入力矩 Torque Right
+    state_pub_->msg_.f_b_l = u(2);   // 左动量轮控制输入力（可能是推力） Force Back Left
+    state_pub_->msg_.f_b_r = u(3);   // 右动量轮控制输入力 Force Back Right
     state_pub_->unlockAndPublish();
   }
 
@@ -482,6 +532,10 @@ void BalanceController::block(const ros::Time& time, const ros::Duration& period
   }
   else
   {
+    /*
+    如果 pitch_ > 0（机器人前倾），则给出反方向的推力和角动量，试图把自己拉回来。
+    如果 pitch_ < 0（机器人后仰），同理方向反转。
+    */
     left_momentum_block_joint_handle_.setCommand(pitch_ > 0 ? -80 : 80);
     right_momentum_block_joint_handle_.setCommand(pitch_ > 0 ? -80 : 80);
     left_wheel_joint_handle_.setCommand(pitch_ > 0 ? -anti_block_effort_ : anti_block_effort_);

@@ -198,10 +198,10 @@ private:
 
   enum
   {
-    RATE,
-    TRACK,
-    DIRECT,
-    TRAJ
+    RATE, //rate
+    TRACK, //track
+    DIRECT,//direct
+    TRAJ //traj
   };
   int state_ = RATE;
   bool start_ = false;
